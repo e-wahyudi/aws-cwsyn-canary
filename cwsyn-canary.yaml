@@ -143,11 +143,11 @@ Resources:
         StartCanaryAfterCreation: True
         Tags:
           - Key: Product
-            Value: !Ref AppNamePrefix
+            Value: <Application/Product Name>
           - Key: Service
-            Value: !Ref AppNamePrefix
+            Value: <Service Name>
           - Key: Team
-            Value: !Ref AppNamePrefix
+            Value: <Team Tag>
           - Key: Owner
             Value: !Ref OwnerEmail      
     
