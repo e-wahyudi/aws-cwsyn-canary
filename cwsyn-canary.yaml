@@ -1,0 +1,153 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: This CFn stack deployed a CloudWatch Synthetic Canary monitoring
+
+Parameters:
+    S3Bucket:
+      Description: Bucket to store canary artifact
+      Type: String
+    ExecutionRoleArn:    
+      Description: Lambda/Canary IAM Service role to execute the monitoring
+      Type: String
+    CanaryUser:
+      Description: Owner tag & Username for portal login
+      Type: String
+    CanaryPassword:
+      Description: password for login portal
+      Type: String
+    PasswordEncryptionContext:
+      Description: Password Decryption Context
+      Type: String
+    URL:
+      Description: Main application URL
+      Type: String
+    OwnerEmail:
+      Description: Email for tagging of resource ownership
+      Type: String
+
+Resources: 
+    Canary:
+      Type: AWS::Synthetics::Canary
+      Properties:
+        # S3 bucket location where screenshots/canary logging will be stored
+        ArtifactS3Location: !Sub s3://${S3Bucket}/canary
+        DeleteLambdaResourcesOnCanaryDeletion: True
+        Code: 
+          Handler: index.handler
+          Script: |
+              import asyncio
+              import boto3
+              import os
+              import base64
+              from aws_synthetics.selenium import synthetics_webdriver as syn_webdriver
+              from aws_synthetics.common import synthetics_logger as logger, synthetics_configuration
+              from selenium.common.exceptions import NoSuchElementException
+
+              TIMEOUT = 10
+
+              def decrypt(client, blob, value):
+                  response =  client.decrypt(
+                              CiphertextBlob=blob,
+                              EncryptionContext={
+                                  "Key": value
+                              }
+                  )
+                  return response["Plaintext"].decode('utf-8')
+
+              async def main():
+                  main_url = str(os.environ.get('URL'))
+                  browser = syn_webdriver.Chrome()
+
+
+                  # Set synthetics configuration
+                  synthetics_configuration.set_config({
+                    "screenshot_on_step_start" : True,
+                    "screenshot_on_step_success": True,
+                    "screenshot_on_step_failure": True
+                  });
+
+
+                  def navigate_to_page():
+                      browser.implicitly_wait(TIMEOUT)
+                      browser.get(main_url)
+
+                  await syn_webdriver.execute_step("nav2_main_url", navigate_to_page)
+
+                  # Execute customer steps
+                  def username():
+                      username = str(os.environ.get('CanaryUser'))
+                      browser.find_element_by_xpath("<XPath_Element_to_Username_field>").send_keys(username)
+
+                  await syn_webdriver.execute_step('input_username', username)
+
+                  def password():
+                      # AWS KMS key is used to encrypt/decrypt the password so that
+                      # it is not shown in the code in Plaintext format
+                      kms = boto3.client('kms')
+                      password = str(os.environ.get('CanaryPassword'))
+                      encryptionContext = str(os.environ.get('PasswordEncryptionContext'))
+                      
+                      password = decrypt(kms, base64.b64decode(password.split("kmsciphertext:")[1]), encryptionContext)
+                      browser.find_element_by_xpath("<XPath_Element_to_Password_field>").send_keys(password)
+
+                  await syn_webdriver.execute_step('input_password', password)
+
+                  def sign_in():
+                      browser.find_element_by_xpath("<XPath_to_Sign-in_button>").click()
+
+                  await syn_webdriver.execute_step('sign_in', sign_in)
+                                
+                  #Verify if Text element exists within the page
+                  def verifyText():
+                      browser.implicitly_wait(5)
+                                            
+                      try:
+                          browser.find_element_by_xpath("<Element#1_XPath>[contains(text(),'Element#1')]") #Try locating Element#1; present, click the Done button
+                          browser.find_element_by_xpath("//*[@id='doneButton']").click()  #Click Done, if Element#1 is present 
+                      except NoSuchElementException:
+                          browser.find_element_by_xpath("<Element#2_XPath>[contains(text(),'Element#2')]")  #Locate Element#2 if Element#1 is absent
+                          
+                  await syn_webdriver.execute_step('verifyText', verifyText)
+
+                  def sign_out_menu():
+                      browser.find_element_by_xpath("<XPath_to_the_SignOut_menu>").click()
+
+                  await syn_webdriver.execute_step('sign_out_menu', sign_out_menu)
+                  
+                  def sign_out():
+                      browser.find_element_by_xpath("<XPath_to_SignOut_Button>").click()
+                  
+                  await syn_webdriver.execute_step('sign_out', sign_out)
+
+                  logger.info("Canary successfully executed")
+
+              async def handler(event, context):
+                  # user defined log statements using synthetics_logger
+                  logger.info("Selenium Python workflow canary")
+                  return await main()
+
+        ExecutionRoleArn: !Ref ExecutionRoleArn
+        FailureRetentionPeriod: 31
+        SuccessRetentionPeriod: 31
+        Name: application-synthetic-canary
+        RuntimeVersion: syn-python-selenium-1.3
+        RunConfig:
+          EnvironmentVariables: 
+            URL: !Ref URL
+            CanaryUser: !Ref CanaryUser
+            CanaryPassword: !Ref CanaryPassword
+            PasswordEncryptionContext: !Ref PasswordEncryptionContext            
+          TimeoutInSeconds: 60
+        Schedule:
+          DurationInSeconds: 0
+          Expression: rate(1 minute)
+        StartCanaryAfterCreation: True
+        Tags:
+          - Key: Product
+            Value: !Ref AppNamePrefix
+          - Key: Service
+            Value: !Ref AppNamePrefix
+          - Key: Team
+            Value: !Ref AppNamePrefix
+          - Key: Owner
+            Value: !Ref OwnerEmail      
+    
